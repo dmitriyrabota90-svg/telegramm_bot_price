@@ -44,6 +44,7 @@ LATEST_MEASUREMENTS_BUTTON = "Последние замеры"
 CHART_BUTTON = "График"
 SUMMARY_BUTTON = "Сводка"
 STATUS_BUTTON = "Статус"
+BACK_BUTTON = "Назад"
 ACCESS_DENIED_MESSAGE = "Доступ запрещен"
 
 logger = logging.getLogger(__name__)
@@ -545,16 +546,10 @@ class PriceBot:
         if not await self._ensure_access(update):
             return
 
-        keyboard = [
-            [CURRENT_PRICES_BUTTON],
-            [LATEST_MEASUREMENTS_BUTTON],
-            [CHART_BUTTON],
-            [SUMMARY_BUTTON, STATUS_BUTTON],
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        self._clear_user_state(update)
         await update.message.reply_text(
             "Нажмите кнопку ниже для получения актуальных цен:",
-            reply_markup=reply_markup
+            reply_markup=self._main_menu_markup()
         )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -562,10 +557,14 @@ class PriceBot:
             return
 
         if self._is_waiting_for_chart_product(update):
-            await self.send_price_chart(update)
+            await self.handle_chart_product_selection(update)
             return
 
-        if update.message.text == CURRENT_PRICES_BUTTON:
+        text = update.message.text
+        if text == BACK_BUTTON:
+            self._clear_user_state(update)
+            await update.message.reply_text("Главное меню:", reply_markup=self._main_menu_markup())
+        elif text == CURRENT_PRICES_BUTTON:
             user = update.effective_user
             logger.info(
                 "User requested prices user_id=%s username=%s",
@@ -605,6 +604,8 @@ class PriceBot:
                 user.username if user else None,
             )
             await self.send_status(update)
+        else:
+            await update.message.reply_text("Выберите действие в главном меню.", reply_markup=self._main_menu_markup())
 
     async def send_prices(self, update: Update):
         results = await execute_fetch_run(run_type="manual")
@@ -614,7 +615,7 @@ class PriceBot:
             + "\n".join(result["user_message"] for result in results)
         )
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=self._main_menu_markup())
 
     async def send_latest_measurements(self, update: Update):
         try:
@@ -623,7 +624,7 @@ class PriceBot:
             logger.exception("Failed to build latest measurements message")
             message = "Не удалось получить последние замеры. Попробуйте позже."
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=self._main_menu_markup())
 
     async def send_summary(self, update: Update):
         try:
@@ -632,7 +633,7 @@ class PriceBot:
             logger.exception("Failed to build summary message")
             message = "Не удалось сформировать сводку. Попробуйте позже."
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=self._main_menu_markup())
 
     async def send_status(self, update: Update):
         try:
@@ -641,33 +642,58 @@ class PriceBot:
             logger.exception("Failed to build status message")
             message = "Не удалось получить статус. Попробуйте позже."
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=self._main_menu_markup())
 
     async def ask_chart_product(self, update: Update):
         user = update.effective_user
         if user:
             self.awaiting_chart_product_users.add(user.id)
 
-        keyboard = [[product["title"]] for product in PRODUCTS]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text("Выберите товар для графика:", reply_markup=reply_markup)
+        await update.message.reply_text("Выберите товар для графика:", reply_markup=self._chart_product_menu_markup())
 
-    async def send_price_chart(self, update: Update):
+    async def handle_chart_product_selection(self, update: Update):
         user = update.effective_user
+        text = update.message.text
+        if text == BACK_BUTTON:
+            self._clear_user_state(update)
+            logger.info(
+                "User returned to main menu from chart selection user_id=%s username=%s",
+                user.id if user else None,
+                user.username if user else None,
+            )
+            await update.message.reply_text("Главное меню:", reply_markup=self._main_menu_markup())
+            return
+
+        product = self._find_product_by_title(text)
+        if product is None:
+            logger.info(
+                "User sent unexpected chart selection text user_id=%s username=%s text=%s",
+                user.id if user else None,
+                user.username if user else None,
+                text,
+            )
+            await update.message.reply_text(
+                "Выберите товар из списка или нажмите «Назад».",
+                reply_markup=self._chart_product_menu_markup(),
+            )
+            return
+
         if user:
             self.awaiting_chart_product_users.discard(user.id)
 
-        product = self._find_product_by_title(update.message.text)
-        if product is None:
-            await update.message.reply_text("Не удалось найти товар. Нажмите «График» и выберите товар из списка.")
-            return
+        await self.send_price_chart(update, product)
 
+    async def send_price_chart(self, update: Update, product: dict):
+        user = update.effective_user
         since = (datetime.now() - timedelta(days=7)).isoformat(timespec="seconds")
         chart_path = None
         try:
             snapshots = get_success_snapshots_for_product_since(product["key"], since)
             if len(snapshots) < 2:
-                await update.message.reply_text(f'Недостаточно данных для графика по товару "{product["title"]}" за последние 7 дней.')
+                await update.message.reply_text(
+                    f'Недостаточно данных для графика по товару "{product["title"]}" за последние 7 дней.',
+                    reply_markup=self._main_menu_markup(),
+                )
                 return
 
             chart_path = build_price_chart(product["title"], snapshots)
@@ -680,9 +706,13 @@ class PriceBot:
             )
             with open(chart_path, "rb") as chart_file:
                 await update.message.reply_photo(photo=chart_file, caption=caption)
+            await update.message.reply_text("Главное меню:", reply_markup=self._main_menu_markup())
         except Exception:
             logger.exception("Failed to build or send price chart product_key=%s", product["key"])
-            await update.message.reply_text("Не удалось построить график. Попробуйте позже.")
+            await update.message.reply_text(
+                "Не удалось построить график. Попробуйте позже.",
+                reply_markup=self._main_menu_markup(),
+            )
         finally:
             if chart_path:
                 try:
@@ -693,6 +723,27 @@ class PriceBot:
     def _is_waiting_for_chart_product(self, update: Update) -> bool:
         user = update.effective_user
         return bool(user and user.id in self.awaiting_chart_product_users)
+
+    def _clear_user_state(self, update: Update) -> None:
+        user = update.effective_user
+        if user:
+            self.awaiting_chart_product_users.discard(user.id)
+
+    @staticmethod
+    def _main_menu_markup() -> ReplyKeyboardMarkup:
+        keyboard = [
+            [CURRENT_PRICES_BUTTON],
+            [LATEST_MEASUREMENTS_BUTTON],
+            [CHART_BUTTON],
+            [SUMMARY_BUTTON, STATUS_BUTTON],
+        ]
+        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    @staticmethod
+    def _chart_product_menu_markup() -> ReplyKeyboardMarkup:
+        keyboard = [[product["title"]] for product in PRODUCTS]
+        keyboard.append([BACK_BUTTON])
+        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
     @staticmethod
     def _find_product_by_title(title: str):

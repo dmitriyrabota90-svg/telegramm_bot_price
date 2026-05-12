@@ -1,0 +1,15 @@
+.env
+prices.db
+*.db
+*.sqlite
+*.sqlite3
+Logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.log
+*.png
+*.tmp
+.DS_Store

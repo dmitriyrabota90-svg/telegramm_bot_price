@@ -64,6 +64,8 @@ def setup_logging() -> None:
         ],
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_scheduled_fetch_times() -> list[time]:
